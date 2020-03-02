@@ -5,6 +5,10 @@
 #if defined(USE_FREEMEM) && defined(USE_PAGING)
 
 #include "paging.h"
+#include "aes.h"
+#include "sha256.h"
+
+#include <stdatomic.h>
 
 uintptr_t paging_backing_storage_addr;
 uintptr_t paging_backing_storage_size;
@@ -188,6 +192,66 @@ uintptr_t __pick_page()
   return target;
 }
 
+uint64_t checksum(void *addr, size_t len)
+{
+    uint64_t hash[4];
+    SHA256_CTX ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, (uint8_t *)addr, len);
+    sha256_final(&ctx, (uint8_t *)hash);
+    return hash[0];
+}
+
+
+static volatile atomic_bool paging_boot_key_reserved = false;
+static volatile atomic_bool paging_boot_key_set = false;
+static uint8_t paging_boot_key[32];
+
+static void establish_boot_key(void)
+{
+  uint8_t boot_key_tmp[32];
+  
+  if (atomic_load(&paging_boot_key_set)) {
+    // Key already set
+    return;
+  }
+  
+  rt_util_getrandom(boot_key_tmp, 32);
+
+  if (atomic_flag_test_and_set(&paging_boot_key_reserved)) {
+    // Lost the race; key already being set. Spin until finished.
+    while (!atomic_load(&paging_boot_key_set));
+    return;
+  }
+
+  memcpy(paging_boot_key, boot_key_tmp, 32);
+  atomic_store(&paging_boot_key_set, true);
+}
+
+
+void enc_buf(const void *addr, void *dst, size_t len)
+{
+    establish_boot_key();
+    uint8_t iv[32] = {0};
+    WORD key_sched[80];
+    aes_key_setup(paging_boot_key, key_sched, 256);
+    
+    aes_encrypt_ctr((uint8_t *)addr, len, (uint8_t *)dst, key_sched, 256, iv);
+}
+
+void dec_buf(const void *addr, void *dst, size_t len)
+{
+    establish_boot_key();
+    uint8_t iv[32] = {0};
+    WORD key_sched[80];
+    aes_key_setup(paging_boot_key, key_sched, 256);
+    
+    aes_decrypt_ctr((uint8_t *)addr, len, (uint8_t *)dst, key_sched, 256, iv);
+}
+
+void malloc() {}
+void free() {}
+
 /* evict a page from EPM and store it to the backing storage
  * back_page (PA1) <-- epm_page (PA2) <-- swap_page (PA1)
  * if swap_page is 0, no need to write epm_page
@@ -200,7 +264,8 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
   assert(back_page < paging_backing_storage_addr + paging_backing_storage_size);
 
   /* not implemented */
-  assert(!encrypt);
+  //uint64_t src_chk_enc, src_chk_dec, dst_chk_enc, dst_chk_dec;
+  //src_chk_dec = checksum((void *)epm_page, RISCV_PAGE_SIZE);
 
   char buffer[RISCV_PAGE_SIZE] = {0,};
   if (swap_page) {
@@ -208,10 +273,25 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
     memcpy(buffer, (void*)swap_page, RISCV_PAGE_SIZE);
   }
 
-  memcpy((void*)back_page, (void*)epm_page, RISCV_PAGE_SIZE);
+  if (encrypt) {
+    enc_buf((void *)epm_page, (void *)back_page, RISCV_PAGE_SIZE);
+    //src_chk_enc = checksum((void *)back_page, RISCV_PAGE_SIZE);
 
-  if (swap_page) {
-    memcpy((void*)epm_page, buffer, RISCV_PAGE_SIZE);
+    //warn("paging out %X (chk=%016llX) to %X (now chk=%016llX)", epm_page, src_chk_dec, back_page, src_chk_enc);
+
+    if (swap_page) {
+      //dst_chk_enc = checksum((void *)buffer, RISCV_PAGE_SIZE);
+      dec_buf((void *)buffer, (void *)epm_page, RISCV_PAGE_SIZE);
+      //dst_chk_dec = checksum((void *)epm_page, RISCV_PAGE_SIZE);
+      
+      //warn("paging in %X (chk=%016llX) to %X (now chk=%016llX)", swap_page, dst_chk_enc, epm_page, dst_chk_dec);
+    }
+  } else {
+    memcpy((void*)back_page, (void*)epm_page, RISCV_PAGE_SIZE);
+  
+    if (swap_page) {
+      memcpy((void*)epm_page, buffer, RISCV_PAGE_SIZE);
+    }
   }
 
   return;
@@ -250,7 +330,7 @@ uintptr_t paging_evict_and_free_one(uintptr_t swap_va)
   assert(target_pte && (*target_pte & PTE_U));
 
   src_pa = pte_ppn(*target_pte) << RISCV_PAGE_BITS;
-  __swap_epm_page(dest_va, __va(src_pa), swap_va, false);
+  __swap_epm_page(dest_va, __va(src_pa), swap_va, true);
 
   /* invalidate target PTE */
   *target_pte = pte_create_invalid(ppn(__paging_pa(dest_va)),

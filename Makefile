@@ -1,6 +1,6 @@
 CC = riscv64-unknown-linux-gnu-gcc
-CFLAGS = -Wall -Werror -fPIC -fno-builtin $(OPTIONS_FLAGS)
-SRCS = boot.c interrupt.c printf.c syscall.c string.c linux_wrap.c io_wrap.c rt_util.c mm.c env.c freemem.c paging.c
+CFLAGS = -Wall -Werror -fPIC -fno-builtin -O0 -fstack-usage -std=c11 -g $(OPTIONS_FLAGS)
+SRCS = aes.c sha256.c boot.c interrupt.c printf.c syscall.c string.c linux_wrap.c io_wrap.c rt_util.c mm.c env.c freemem.c paging.c
 ASM_SRCS = entry.S
 RUNTIME = eyrie-rt
 LINK = riscv64-unknown-linux-gnu-ld
