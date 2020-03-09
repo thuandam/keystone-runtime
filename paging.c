@@ -7,14 +7,19 @@
 #include "paging.h"
 #include "aes.h"
 #include "sha256.h"
+#include "merkle.h"
 
 #include <stdatomic.h>
 
 uintptr_t paging_backing_storage_addr;
 uintptr_t paging_backing_storage_size;
 uintptr_t paging_next_backing_page_offset;
+uintptr_t paging_inc_backing_page_offset_by;
 
 static uintptr_t paging_user_page_count = 0;
+
+#define NUM_CTR_INDIRECTS 24
+static uintptr_t ctr_indirect_ptrs[NUM_CTR_INDIRECTS];
 
 extern uintptr_t rt_trap_table;
 
@@ -31,19 +36,19 @@ void paging_dec_user_page(void)
 
 uintptr_t __alloc_backing_page()
 {
-  uintptr_t next_page;
+  uintptr_t offs_update = (paging_next_backing_page_offset + paging_inc_backing_page_offset_by) % paging_backing_storage_size;
 
   /* no backing page available */
-  if (paging_next_backing_page_offset >= paging_backing_storage_size) {
+  if (offs_update == 0) {
+    // cycled through all the pages
     warn("no backing page avaiable");
     return 0;
   }
 
-  next_page = paging_backing_storage_addr + paging_next_backing_page_offset;
+  uintptr_t next_page = paging_backing_storage_addr + paging_next_backing_page_offset;
   assert(IS_ALIGNED(next_page, RISCV_PAGE_BITS));
 
-  paging_next_backing_page_offset += RISCV_PAGE_SIZE;
-
+  paging_next_backing_page_offset = offs_update;
   return next_page;
 }
 
@@ -51,6 +56,16 @@ unsigned int
 paging_remaining_pages()
 {
   return (paging_backing_storage_size - paging_next_backing_page_offset)/RISCV_PAGE_SIZE;
+}
+
+uintptr_t gcd(uintptr_t a, uintptr_t b)
+{
+  while (b) {
+    uintptr_t tmp = b;
+    b = a % b;
+    a = tmp;
+  }
+  return a;
 }
 
 void init_paging(uintptr_t user_pa_start, uintptr_t user_pa_end)
@@ -78,6 +93,17 @@ void init_paging(uintptr_t user_pa_start, uintptr_t user_pa_end)
   paging_pa_start = addr;
   paging_backing_storage_size = size;
   paging_backing_storage_addr = __paging_va(addr);
+
+  uintptr_t backing_pages = paging_backing_storage_size / RISCV_PAGE_SIZE;
+
+  uintptr_t inc;
+  do {
+    inc = backing_pages / 2 + sbi_random() % (backing_pages / 2);
+  } while (gcd(inc, backing_pages) != 1);
+
+  paging_inc_backing_page_offset_by = inc * RISCV_PAGE_SIZE;
+  warn("num_pages = %zx, pagesize_inc = %zx", backing_pages, inc);
+
   paging_next_backing_page_offset = 0;
 
   debug("BACK: 0x%lx-0x%lx (%u KB), va 0x%lx", addr, addr + size, size/1024, paging_backing_storage_addr);
@@ -192,16 +218,6 @@ uintptr_t __pick_page()
   return target;
 }
 
-uint64_t checksum(void *addr, size_t len)
-{
-    uint64_t hash[4];
-    SHA256_CTX ctx;
-    sha256_init(&ctx);
-    sha256_update(&ctx, (uint8_t *)addr, len);
-    sha256_final(&ctx, (uint8_t *)hash);
-    return hash[0];
-}
-
 
 static volatile atomic_bool paging_boot_key_reserved = false;
 static volatile atomic_bool paging_boot_key_set = false;
@@ -228,29 +244,51 @@ static void establish_boot_key(void)
   atomic_store(&paging_boot_key_set, true);
 }
 
+static uint64_t *pageout_ctr_ptr(uintptr_t page)
+{
+  assert(page >= paging_backing_storage_addr);
+  size_t idx = (page - paging_backing_storage_addr) >> RISCV_PAGE_BITS;
+  size_t indirect_idx = idx / (RISCV_PAGE_SIZE / 8);
+  size_t interior_idx = idx % (RISCV_PAGE_SIZE / 8);
+  assert(indirect_idx < NUM_CTR_INDIRECTS);
 
-void enc_buf(const void *addr, void *dst, size_t len)
+  if (!ctr_indirect_ptrs[indirect_idx]) {
+    ctr_indirect_ptrs[indirect_idx] = __alloc_backing_page();
+    // Fill ptr pages with random values so our counters start unpredictable
+    rt_util_getrandom((void *)ctr_indirect_ptrs[indirect_idx], RISCV_PAGE_SIZE);
+  }
+
+  return (uint64_t *)(ctr_indirect_ptrs[indirect_idx]) + interior_idx;
+}
+
+static merkle_node_t paging_merk_root = {};
+
+static void enc_buf(const void *addr, void *dst, size_t len, uint64_t pageout_ctr)
 {
     establish_boot_key();
     uint8_t iv[32] = {0};
     WORD key_sched[80];
     aes_key_setup(paging_boot_key, key_sched, 256);
+
+    memcpy(iv + 8, &pageout_ctr, 8);
     
     aes_encrypt_ctr((uint8_t *)addr, len, (uint8_t *)dst, key_sched, 256, iv);
 }
 
-void dec_buf(const void *addr, void *dst, size_t len)
+static void dec_buf(const void *addr, void *dst, size_t len, uint64_t pageout_ctr)
 {
     establish_boot_key();
     uint8_t iv[32] = {0};
     WORD key_sched[80];
     aes_key_setup(paging_boot_key, key_sched, 256);
+
+    memcpy(iv + 8, &pageout_ctr, 8);
     
     aes_decrypt_ctr((uint8_t *)addr, len, (uint8_t *)dst, key_sched, 256, iv);
 }
 
-void malloc() {}
-void free() {}
+void *malloc(size_t size) { return NULL; }
+void free(void *ptr) {}
 
 /* evict a page from EPM and store it to the backing storage
  * back_page (PA1) <-- epm_page (PA2) <-- swap_page (PA1)
@@ -263,29 +301,40 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
   assert(back_page >= paging_backing_storage_addr);
   assert(back_page < paging_backing_storage_addr + paging_backing_storage_size);
 
-  /* not implemented */
-  //uint64_t src_chk_enc, src_chk_dec, dst_chk_enc, dst_chk_dec;
-  //src_chk_dec = checksum((void *)epm_page, RISCV_PAGE_SIZE);
-
   char buffer[RISCV_PAGE_SIZE] = {0,};
   if (swap_page) {
     assert(swap_page == back_page);
     memcpy(buffer, (void*)swap_page, RISCV_PAGE_SIZE);
   }
 
-  if (encrypt) {
-    enc_buf((void *)epm_page, (void *)back_page, RISCV_PAGE_SIZE);
-    //src_chk_enc = checksum((void *)back_page, RISCV_PAGE_SIZE);
+  uint64_t *pageout_ctr = pageout_ctr_ptr(back_page);
+  uint64_t old_pageout_ctr = *pageout_ctr;
+  uint64_t new_pageout_ctr = old_pageout_ctr + 1;
 
-    //warn("paging out %X (chk=%016llX) to %X (now chk=%016llX)", epm_page, src_chk_dec, back_page, src_chk_enc);
+  SHA256_CTX hasher;
+
+  if (encrypt) {
+    uint8_t new_hash[32];
+    sha256_init(&hasher);
+    sha256_update(&hasher, (void *)epm_page, RISCV_PAGE_SIZE);
+    sha256_final(&hasher, new_hash);
+
+    enc_buf((void *)epm_page, (void *)back_page, RISCV_PAGE_SIZE, new_pageout_ctr);
 
     if (swap_page) {
-      //dst_chk_enc = checksum((void *)buffer, RISCV_PAGE_SIZE);
-      dec_buf((void *)buffer, (void *)epm_page, RISCV_PAGE_SIZE);
-      //dst_chk_dec = checksum((void *)epm_page, RISCV_PAGE_SIZE);
-      
-      //warn("paging in %X (chk=%016llX) to %X (now chk=%016llX)", swap_page, dst_chk_enc, epm_page, dst_chk_dec);
+      uint8_t old_hash[32];
+      dec_buf((void *)buffer, (void *)epm_page, RISCV_PAGE_SIZE, old_pageout_ctr);
+
+      sha256_init(&hasher);
+      sha256_update(&hasher, (void *)epm_page, RISCV_PAGE_SIZE);
+      sha256_final(&hasher, old_hash);
+
+      bool ok = merk_verify(&paging_merk_root, back_page, old_hash);
+      assert(ok);
     }
+
+    merk_insert(&paging_merk_root, back_page, new_hash);
+
   } else {
     memcpy((void*)back_page, (void*)epm_page, RISCV_PAGE_SIZE);
   
@@ -293,6 +342,8 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
       memcpy((void*)epm_page, buffer, RISCV_PAGE_SIZE);
     }
   }
+
+  *pageout_ctr = new_pageout_ctr;
 
   return;
 }
