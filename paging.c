@@ -317,6 +317,7 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
     uint8_t new_hash[32];
     sha256_init(&hasher);
     sha256_update(&hasher, (void *)epm_page, RISCV_PAGE_SIZE);
+    sha256_update(&hasher, (uint8_t *)&new_pageout_ctr, sizeof(new_pageout_ctr));
     sha256_final(&hasher, new_hash);
 
     enc_buf((void *)epm_page, (void *)back_page, RISCV_PAGE_SIZE, new_pageout_ctr);
@@ -327,6 +328,7 @@ void __swap_epm_page(uintptr_t back_page, uintptr_t epm_page, uintptr_t swap_pag
 
       sha256_init(&hasher);
       sha256_update(&hasher, (void *)epm_page, RISCV_PAGE_SIZE);
+      sha256_update(&hasher, (uint8_t *)&old_pageout_ctr, sizeof(old_pageout_ctr));
       sha256_final(&hasher, old_hash);
 
       bool ok = merk_verify(&paging_merk_root, back_page, old_hash);
