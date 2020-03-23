@@ -1,7 +1,8 @@
-#define STORE sd
-#define LOAD ld
+#define STORE sw
+#define LOAD lw
 #define LWU lwu
-#define LOG_REGBYTES  3
+#define DOTWORD	.word
+#define LOG_REGBYTES  2
 #define REGBYTES (1<<LOG_REGBYTES)
 #define ENCL_CONTEXT_SIZE (REGBYTES*35)
 #define HOST_CONTEXT_SIZE (REGBYTES*32)
@@ -210,19 +211,19 @@ not_implemented:
   .section ".rodata"
 rt_trap_table:
   .align 6
-  .dword not_implemented_fatal //0
-  .dword not_implemented_fatal //1
-  .dword not_implemented_fatal //2
-  .dword not_implemented_fatal //3
-  .dword not_implemented_fatal //4
-  .dword not_implemented_fatal //5
-  .dword not_implemented_fatal //6
-  .dword not_implemented_fatal //7
-  .dword handle_syscall //8
-  .dword not_implemented_fatal //9
-  .dword not_implemented_fatal //10
-  .dword not_implemented_fatal //11
-  .dword not_implemented_fatal //12: fetch page fault - code always presents in memory
-  .dword rt_page_fault //13: load page fault - stack/heap access
-  .dword not_implemented_fatal //14
-  .dword rt_page_fault //15: store page fault - stack/heap access
+  DOTWORD not_implemented_fatal //0
+  DOTWORD not_implemented_fatal //1
+  DOTWORD not_implemented_fatal //2
+  DOTWORD not_implemented_fatal //3
+  DOTWORD not_implemented_fatal //4
+  DOTWORD not_implemented_fatal //5
+  DOTWORD not_implemented_fatal //6
+  DOTWORD not_implemented_fatal //7
+  DOTWORD handle_syscall //8
+  DOTWORD not_implemented_fatal //9
+  DOTWORD not_implemented_fatal //10
+  DOTWORD not_implemented_fatal //11
+  DOTWORD not_implemented_fatal //12: fetch page fault - code always presents in memory
+  DOTWORD rt_page_fault //13: load page fault - stack/heap access
+  DOTWORD not_implemented_fatal //14
+  DOTWORD rt_page_fault //15: store page fault - stack/heap access

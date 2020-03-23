@@ -1,10 +1,13 @@
-CC = riscv64-unknown-linux-gnu-gcc
+CC = riscv32-unknown-linux-gnu-gcc
 CFLAGS = -Wall -Werror -fPIC -fno-builtin $(OPTIONS_FLAGS)
 SRCS = boot.c interrupt.c printf.c syscall.c string.c linux_wrap.c io_wrap.c rt_util.c mm.c env.c freemem.c
 ASM_SRCS = entry.S
 RUNTIME = eyrie-rt
-LINK = riscv64-unknown-linux-gnu-ld
+LINK = riscv32-unknown-linux-gnu-ld
 LDFLAGS = -static -nostdlib
+
+LIBGCC_PATH = $(shell $(CC) --print-libgcc-file-name)
+RUNTIME_ADDEND_LINKFLAGS = -L$(dir $(LIBGCC_PATH)) -lgcc
 
 SDK_LIB_DIR = $(KEYSTONE_SDK_DIR)/lib
 SDK_INCLUDE_EDGE_DIR = $(SDK_LIB_DIR)/edge/include
@@ -38,7 +41,7 @@ copy: $(RUNTIME) $(DISK_IMAGE)
 	rm -rf $(MOUNT_DIR)
 
 $(RUNTIME): $(ASM_OBJS) $(OBJS) $(SDK_EDGE_LIB) $(TMPLIB)
-	$(LINK) $(LINKFLAGS) -o $@ $^ -T runtime.lds
+	$(LINK) $(LINKFLAGS) -o $@ $^ -T runtime.lds $(RUNTIME_ADDEND_LINKFLAGS)
 
 $(ASM_OBJS): $(ASM_SRCS)
 	$(CC) $(CFLAGS) -c $<

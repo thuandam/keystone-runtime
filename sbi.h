@@ -47,13 +47,22 @@ static inline void sbi_set_timer(uint64_t stime_value){
 #endif
 }
 
-static inline void sbi_stop_enclave(uint64_t request)
+#if __riscv_xlen == 64
+#define XLEN_T uint64_t
+#else
+#define XLEN_T uint32_t
+#endif
+
+static inline void sbi_stop_enclave(XLEN_T request)
 {
   SBI_CALL_1(SBI_SM_STOP_ENCLAVE, request);
 }
 
-static inline void sbi_exit_enclave(uint64_t retval)
+static inline void sbi_exit_enclave(XLEN_T retval)
 {
   SBI_CALL_1(SBI_SM_EXIT_ENCLAVE, retval);
 }
+
+#undef XLEN_T
+
 #endif
